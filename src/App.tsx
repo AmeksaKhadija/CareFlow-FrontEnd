@@ -8,7 +8,7 @@ export default function App() {
       {routes.map((r) => (
         <Route key={r.path} path={r.path} element={r.element} />
       ))}
-      <Route path="*" element={<Navigate to="/login" replace />} />
+      <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   );
 }
