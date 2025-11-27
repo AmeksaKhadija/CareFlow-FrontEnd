@@ -1,197 +1,199 @@
-import React, {
+﻿import React, {
   createContext,
   useContext,
   useEffect,
   useState,
-  ReactNode,
+  type ReactNode,
 } from "react";
 import { apiClient } from "../api/client";
 
-type Role =
-  | "Admin"
-  | "Doctor"
-  | "Nurse"
-  | "Patient"
-  | "Pharmacist"
-  | "Lab"
-  | "Staff";
+type Role = "admin" | "secretary" | "patient";
+
 type User = {
-  id: string;
-  email: string;
+  id: number;
   name: string;
-  roles: Role[];
-  firstName?: string;
-  lastName?: string;
-  phone?: string;
-  specialty?: string;
+  email: string;
+  role: Role;
 };
 
 type AuthContextType = {
   user: User | null;
-  token: string | null;
-  login: (email: string, password: string) => Promise<User | null>;
+  login: (email: string, password: string) => Promise<boolean>;
   logout: () => void;
-  hasRole: (roles: string[] | Role[]) => boolean;
+  isAuthenticated: boolean;
   isLoading: boolean;
 };
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
-export function AuthProvider({ children }: { children: ReactNode }) {
+export const AuthProvider: React.FC<{ children: ReactNode }> = ({
+  children,
+}) => {
   const [user, setUser] = useState<User | null>(null);
-  const [token, setToken] = useState<string | null>(() =>
-    localStorage.getItem("cf_token")
-  );
   const [isLoading, setIsLoading] = useState(true);
 
+  const isAuthenticated = !!user;
+
   useEffect(() => {
-    if (token) {
-      // Essayer plusieurs endpoints pour récupérer le profil utilisateur
-      (async () => {
-        try {
-          const res = await apiClient.get("/auth/me");
-          setUser(res.data);
-          setIsLoading(false);
-          return;
-        } catch (e: any) {
-          // ignore and try fallback
-          // but keep the error for possible status checks
-        }
+    const checkAuth = async () => {
+      console.log("🔍 Checking authentication...");
+      const token = localStorage.getItem("cf_token");
+
+      if (token) {
+        console.log("✅ Token found:", token.substring(0, 20) + "...");
 
         try {
-          const res2 = await apiClient.get("/users/me");
-          setUser(res2.data);
-          setIsLoading(false);
-          return;
-        } catch (e: any) {
-          // If the failure is an unauthorized (401), clear the auth state.
-          const status = e?.response?.status;
-          if (status === 401) {
-            setUser(null);
-            setToken(null);
-            localStorage.removeItem("cf_token");
-          }
-          // For other errors (404 endpoint not present etc.) try to recover user from token
-          // by decoding the JWT payload. This allows session persistence across refresh
-          // even if the backend does not expose a /auth/me endpoint.
-          try {
-            const parseJwt = (t: string) => {
-              try {
-                const payload = t.split(".")[1];
-                const base64 = payload.replace(/-/g, "+").replace(/_/g, "/");
-                const json = decodeURIComponent(
-                  atob(base64)
-                    .split("")
-                    .map(
-                      (c) =>
-                        "%" + ("00" + c.charCodeAt(0).toString(16)).slice(-2)
-                    )
-                    .join("")
-                );
-                return JSON.parse(json);
-              } catch {
-                return null;
-              }
+          // Try to decode JWT token for fallback user info
+          const base64Url = token.split(".")[1];
+          if (base64Url) {
+            const base64 = base64Url.replace(/-/g, "+").replace(/_/g, "/");
+            const jsonPayload = decodeURIComponent(
+              atob(base64)
+                .split("")
+                .map(function (c) {
+                  return "%" + ("00" + c.charCodeAt(0).toString(16)).slice(-2);
+                })
+                .join("")
+            );
+
+            const decodedToken = JSON.parse(jsonPayload);
+            console.log("📋 Decoded token:", decodedToken);
+
+            // Create user object from token as fallback
+            const fallbackUser: User = {
+              id:
+                decodedToken.sub || decodedToken.userId || decodedToken.id || 1,
+              name: decodedToken.name || decodedToken.username || "Admin User",
+              email: decodedToken.email || "admin@careflow.com",
+              role: decodedToken.role || "admin",
             };
 
-            const claims = parseJwt(token as string);
-            if (claims) {
-              const maybeUser: any = {};
-              maybeUser.id =
-                claims.sub || claims.id || claims.userId || claims.uid;
-              maybeUser.email =
-                claims.email || claims.upn || claims.preferred_username;
-              maybeUser.name =
-                claims.name ||
-                claims.fullname ||
-                claims.preferred_username ||
-                maybeUser.email;
-              // roles can be in different claim names
-              maybeUser.roles =
-                claims.roles || claims.role || claims.authorities || [];
-              // normalize single role string to array
-              if (maybeUser.roles && typeof maybeUser.roles === "string") {
-                maybeUser.roles = [maybeUser.roles];
+            console.log("👤 Created fallback user:", fallbackUser);
+
+            // First try the backend endpoint
+            try {
+              console.log("🌐 Trying /auth/me endpoint...");
+              const response = await apiClient.get("/auth/me");
+              console.log("✅ /auth/me success:", response.data);
+              setUser(response.data);
+            } catch (authError: any) {
+              console.log(
+                "❌ /auth/me failed, trying fallback...",
+                authError.response?.status
+              );
+
+              // If backend is not available, use token data
+              if (
+                authError.response?.status === 404 ||
+                authError.response?.status === 401
+              ) {
+                console.log("🔄 Using token fallback user:", fallbackUser);
+                setUser(fallbackUser);
+              } else {
+                console.log("🗑️ Removing invalid token");
+                localStorage.removeItem("cf_token");
               }
-              setUser(maybeUser as any);
             }
-          } catch {
-            // failed to recover from token
+          } else {
+            console.log("🗑️ Invalid token format");
+            localStorage.removeItem("cf_token");
           }
-          setIsLoading(false);
+        } catch (error) {
+          console.error("❌ Error processing token:", error);
+          localStorage.removeItem("cf_token");
         }
-      })();
-    } else {
-      setIsLoading(false);
-    }
-  }, [token]);
-
-  const login = async (email: string, password: string) => {
-    try {
-      const res = await apiClient.post("/auth/login", { email, password });
-      const t = res.data?.token || res.data?.accessToken;
-      if (t) {
-        localStorage.setItem("cf_token", t);
-        setToken(t);
-
-        // Après avoir stocké le token, essayer de récupérer le profil via plusieurs endpoints
-        try {
-          const prof = await apiClient.get("/auth/me");
-          setUser(prof.data);
-          return prof.data;
-        } catch (e) {
-          // essai fallback
-        }
-
-        try {
-          const prof2 = await apiClient.get("/users/me");
-          setUser(prof2.data);
-          return prof2.data;
-        } catch (e) {
-          // Si le serveur ne propose pas d'endpoint pour le profil,
-          // tenter d'extraire les données renvoyées directement par /auth/login
-          const possibleUser =
-            res.data?.user || res.data?.profile || res.data?.data;
-          if (possibleUser) {
-            setUser(possibleUser);
-            return possibleUser;
-          }
-
-          // Aucun profil récupéré : on garde le token mais on retourne null
-          return null;
-        }
+      } else {
+        console.log("❌ No token found");
       }
-      return null;
-    } catch (error: any) {
-      throw new Error(error.response?.data?.message || "Erreur de connexion");
+
+      setIsLoading(false);
+    };
+
+    checkAuth();
+  }, []);
+
+  const login = async (email: string, password: string): Promise<boolean> => {
+    try {
+      setIsLoading(true);
+      console.log("🔐 Attempting login for:", email);
+
+      const response = await apiClient.post("/auth/login", {
+        email,
+        password,
+      });
+
+      console.log("📩 Login response:", response.data);
+
+      if (response.data.token) {
+        localStorage.setItem("cf_token", response.data.token);
+
+        // If user data is provided, use it
+        if (response.data.user) {
+          setUser(response.data.user);
+        } else {
+          // If no user data, try to decode from token
+          try {
+            const base64Url = response.data.token.split(".")[1];
+            const base64 = base64Url.replace(/-/g, "+").replace(/_/g, "/");
+            const jsonPayload = decodeURIComponent(
+              atob(base64)
+                .split("")
+                .map(function (c) {
+                  return "%" + ("00" + c.charCodeAt(0).toString(16)).slice(-2);
+                })
+                .join("")
+            );
+
+            const decodedToken = JSON.parse(jsonPayload);
+
+            const tokenUser: User = {
+              id:
+                decodedToken.sub || decodedToken.userId || decodedToken.id || 1,
+              name: decodedToken.name || decodedToken.username || "User",
+              email: email, // Use the login email
+              role: decodedToken.role || "admin",
+            };
+
+            console.log("👤 Created user from token:", tokenUser);
+            setUser(tokenUser);
+          } catch (tokenError) {
+            console.error("❌ Error decoding token:", tokenError);
+            return false;
+          }
+        }
+
+        return true;
+      }
+
+      return false;
+    } catch (error) {
+      console.error("❌ Login error:", error);
+      return false;
+    } finally {
+      setIsLoading(false);
     }
   };
 
   const logout = () => {
-    apiClient.post("/auth/logout").catch(() => {});
-    setUser(null);
-    setToken(null);
     localStorage.removeItem("cf_token");
+    setUser(null);
   };
 
-  const hasRole = (roles: string[] | Role[]) => {
-    if (!user) return false;
-    const userRoles = (user as any).roles;
-    if (!Array.isArray(userRoles) || userRoles.length === 0) return false;
-    return roles.some((r) => userRoles.includes(r as Role));
+  const value: AuthContextType = {
+    user,
+    login,
+    logout,
+    isAuthenticated,
+    isLoading,
   };
 
-  return (
-    <AuthContext.Provider
-      value={{ user, token, login, logout, hasRole, isLoading }}
-    >
-      {children}
-    </AuthContext.Provider>
-  );
-}
+  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
+};
 
-export function useAuth() {
-  const ctx = useContext(AuthContext);
-  if (!ctx) throw new Error("useAuth must be used inside AuthProvider");
-  return ctx;
-}
+export const useAuth = () => {
+  const context = useContext(AuthContext);
+  if (context === undefined) {
+    throw new Error("useAuth must be used within an AuthProvider");
+  }
+  return context;
+};

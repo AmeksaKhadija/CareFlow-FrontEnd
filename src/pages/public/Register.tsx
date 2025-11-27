@@ -4,12 +4,6 @@ import { useAuth } from "../../hooks/useAuth";
 
 const roles = [
   {
-    value: "patient",
-    label: "Patient",
-    description: "Prendre des rendez-vous et consulter mes dossiers",
-    icon: "🧑‍🦱",
-  },
-  {
     value: "medecin",
     label: "Médecin",
     description: "Gérer les consultations et dossiers patients",
@@ -67,6 +61,14 @@ export default function Register() {
 
     if (!formData.role) {
       setError("Veuillez sélectionner un rôle");
+      return;
+    }
+
+    // Defensive: block patient self-registration from the client
+    if (formData.role === "patient") {
+      setError(
+        "Les comptes patients ne peuvent pas être créés via cette page. Demandez à un administrateur ou une secrétaire de créer le compte pour le patient."
+      );
       return;
     }
 
@@ -361,6 +363,16 @@ export default function Register() {
                   </label>
                 ))}
               </div>
+            </div>
+
+            <div className="mb-6 p-4 bg-yellow-50 border border-yellow-200 rounded-lg">
+              <p className="text-yellow-800 text-sm">
+                ⚠️ <strong>Important :</strong> Les comptes de type{" "}
+                <em>Patient</em> ne peuvent pas être créés par les utilisateurs
+                eux-mêmes. Seuls les administrateurs ou les secrétaires peuvent
+                créer des comptes patients depuis le tableau de bord
+                administrateur.
+              </p>
             </div>
 
             <div className="mb-6 p-4 bg-blue-50 border border-blue-200 rounded-lg">

@@ -31,10 +31,10 @@ export const userService = {
   getUsers: async (role?: string): Promise<User[]> => {
     const params = role ? { role } : {};
     const response = await apiClient.get("/users", { params });
-    // Normalize response shape: some backends return { data: [...] } while
-    // others return the array directly. Prefer the inner array if present.
+    // Normalize response shape: some backends return { data: [...] }, { users: [...] }
+    // or the array directly. Prefer the inner array if present.
     const payload = response.data;
-    return payload?.data ?? payload;
+    return payload?.users ?? payload?.data ?? payload;
   },
 
   // Récupérer les médecins spécifiquement
@@ -43,13 +43,13 @@ export const userService = {
       params: { role: "medecin" },
     });
     const payload = response.data;
-    return payload?.data ?? payload;
+    return payload?.users ?? payload?.data ?? payload;
   },
 
   // Récupérer un utilisateur par ID
   getUserById: async (id: string): Promise<User> => {
     const response = await apiClient.get(`/users/${id}`);
     const payload = response.data;
-    return payload?.data ?? payload;
+    return payload?.user ?? payload?.data ?? payload;
   },
 };

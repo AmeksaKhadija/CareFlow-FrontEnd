@@ -39,7 +39,7 @@ export default function Dashboard() {
     );
   }
 
-  const userRole = user.roles[0];
+  const userRole = user.role;
 
   const getRoleLabel = (role: string) => {
     const roleMap: Record<string, string> = {
