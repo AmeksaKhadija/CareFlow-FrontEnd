@@ -30,6 +30,8 @@ export default function Profile() {
   const [tempUser, setTempUser] = useState<any>(null);
   const [patient, setPatient] = useState<any>(null);
   const [patientLoading, setPatientLoading] = useState(false);
+  const [pendingSaveKey, setPendingSaveKey] = useState<string | null>(null);
+  const [isRetrying, setIsRetrying] = useState(false);
 
   const [profileData, setProfileData] = useState({
     name: user?.name || "",
@@ -42,11 +44,12 @@ export default function Profile() {
 
   // Zod schema pour validation des données patient
   const patientSchema = z.object({
-    firstName: z.string().min(1, "Prénom requis"),
-    lastName: z.string().min(1, "Nom requis"),
-    dateOfBirth: z.string().optional(),
-    gender: z.enum(["male", "female", "other"]).optional(),
-    phone: z.string().optional(),
+    userId: z.string().min(1, "User ID requis"),
+    firstName: z.string().trim().min(1, "Prénom requis").max(50),
+    lastName: z.string().trim().min(1, "Nom requis").max(50),
+    dateOfBirth: z.string().min(1, "Date de naissance requise"),
+    gender: z.enum(["male", "female", "other"]),
+    phone: z.string().min(4, "Téléphone requis").max(20, "Téléphone trop long"),
     address: z.object({
       street: z.string().optional(),
       city: z.string().optional(),
@@ -245,6 +248,75 @@ export default function Profile() {
     }));
   };
 
+  // Retry a pending saved patient payload (saved to localStorage)
+  const retryPendingSave = async () => {
+    if (!pendingSaveKey) return;
+    const raw = localStorage.getItem(pendingSaveKey);
+    if (!raw) {
+      setError("Aucune sauvegarde locale trouvée pour réessayer.");
+      setPendingSaveKey(null);
+      return;
+    }
+
+    let saved: any;
+    try {
+      saved = JSON.parse(raw);
+    } catch (e) {
+      setError("Données locales corrompues.");
+      localStorage.removeItem(pendingSaveKey);
+      setPendingSaveKey(null);
+      return;
+    }
+
+    setIsRetrying(true);
+    setError("");
+    try {
+      // Try same sequence: POST -> search+PATCH -> PUT -> PATCH /patients/user/:userId
+      try {
+        await apiClient.post(`/patients`, saved);
+      } catch (postErr: any) {
+        // fallback: try GET /patients?user=
+        const userId = saved.userId;
+        try {
+          const listRes = await apiClient.get(`/patients`, {
+            params: { user: userId },
+          });
+          const list = listRes.data?.data ?? listRes.data;
+          if (Array.isArray(list) && list.length > 0) {
+            const existing = list[0];
+            const id = existing._id || existing.id;
+            if (id) {
+              await apiClient.patch(`/patients/${id}`, saved);
+            } else {
+              await apiClient.patch(`/patients/user/${userId}`, saved);
+            }
+          } else {
+            try {
+              await apiClient.put(`/patients/${userId}`, saved);
+            } catch (putErr: any) {
+              await apiClient.patch(`/patients/user/${userId}`, saved);
+            }
+          }
+        } catch (fallbackErr: any) {
+          throw fallbackErr;
+        }
+      }
+
+      // If we reach here, success
+      localStorage.removeItem(pendingSaveKey);
+      setPendingSaveKey(null);
+      setSuccess("Données patient envoyées avec succès.");
+      setTimeout(() => navigate("/dashboard?from=profile"), 900);
+    } catch (finalErr: any) {
+      console.error("Retry failed:", finalErr);
+      setError(
+        "Réessai échoué — vérifiez votre connexion ou contactez l'administrateur."
+      );
+    } finally {
+      setIsRetrying(false);
+    }
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError("");
@@ -252,32 +324,17 @@ export default function Profile() {
     setIsLoading(true);
 
     try {
-      // Si c'est un utilisateur venant de l'inscription (pas encore authentifié)
-      if (tempUser && !user) {
-        console.log(
-          "🎯 Utilisateur depuis inscription - Connexion automatique..."
-        );
+      // determine or refresh userId (handle temp registration flow)
+      let userId = currentUser?.id;
 
-        // Essayer de se connecter automatiquement avec les données d'inscription
+      if (tempUser && !user) {
         const registrationData = localStorage.getItem("cf_registration_data");
         if (registrationData) {
           const { email, password } = JSON.parse(registrationData);
-
           try {
-            // Utiliser la fonction login du context pour authentifier et récupérer l'utilisateur
             const loggedUser = await login(email, password);
-            const userId = loggedUser?.id || currentUser?.id;
-
-            // Maintenant sauvegarder le profil avec le token stocké par login()
-            // Déterminer le rôle principal (peut venir de loggedUser.roles ou tempUser.role)
-            const primaryRole =
-              (loggedUser &&
-                (loggedUser as any).roles &&
-                (loggedUser as any).roles[0]) ||
-              (tempUser && (tempUser.role || "")) ||
-              getPrimaryRole();
-
-            // Supprimer le mot de passe du stockage temporaire pour la sécurité
+            userId = loggedUser?.id || userId;
+            // remove password from storage for security
             try {
               const reg = JSON.parse(
                 localStorage.getItem("cf_registration_data") || "{}"
@@ -290,110 +347,26 @@ export default function Profile() {
                 );
               }
             } catch {}
-
-            // Si l'utilisateur est un patient, créer/mettre à jour l'entrée patients
-            if (primaryRole === "patient") {
-              const patientPayload: any = {
-                user: userId,
-                firstName: profileData.firstName,
-                lastName: profileData.lastName,
-                phone: profileData.phone,
-                address: { street: profileData.address || "" },
-              };
-
-              try {
-                // Essayer de créer le patient
-                await apiClient.post(`/patients`, patientPayload);
-              } catch (pe: any) {
-                // Si endpoint create absent or patient exists, essayer d'upsert via user id
-                if (
-                  pe?.response?.status === 404 ||
-                  pe?.response?.status === 409
-                ) {
-                  try {
-                    // essayer par user id si disponible
-                    await apiClient.patch(
-                      `/patients/user/${userId}`,
-                      patientPayload
-                    );
-                  } catch (pe2: any) {
-                    // dernier recours : essayer PUT /patients/:id
-                    try {
-                      await apiClient.put(
-                        `/patients/${userId}`,
-                        patientPayload
-                      );
-                    } catch (pe3: any) {
-                      console.error("Erreur création/upsert patient:", pe3);
-                      throw pe3;
-                    }
-                  }
-                } else {
-                  console.error("Erreur création patient:", pe);
-                  throw pe;
-                }
-              }
-
-              setSuccess(
-                "✅ Profil patient enregistré ! Redirection vers votre tableau de bord..."
-              );
-              localStorage.removeItem("cf_registration_data");
-              setTempUser(null);
-              setTimeout(() => {
-                navigate("/dashboard?from=profile");
-              }, 1200);
-              return;
-            }
-
-            // Pour les autres rôles, mettre à jour l'utilisateur comme avant
-            try {
-              await apiClient.patch(`/users/${userId}`, profileData);
-            } catch (e: any) {
-              if (e?.response?.status === 404) {
-                await apiClient.patch(`/users/profile`, profileData);
-              } else {
-                throw e;
-              }
-            }
-
-            setSuccess(
-              "✅ Profil complété avec succès ! Redirection vers le tableau de bord..."
-            );
-            localStorage.removeItem("cf_registration_data"); // Nettoyer
-            setTempUser(null);
-
-            setTimeout(() => {
-              navigate("/dashboard?from=profile");
-            }, 1500);
-            return;
-          } catch (authError) {
-            console.log(
-              "❌ Erreur lors de la connexion automatique:",
-              authError
-            );
+          } catch (loginErr) {
+            console.log("Connexion automatique échouée:", loginErr);
           }
         }
-
-        // Si la connexion automatique échoue, sauvegarder les données et rediriger vers login
-        setSuccess("Profil sauvegardé ! Redirection vers la connexion...");
-        setTimeout(() => {
-          navigate(
-            `/login?email=${encodeURIComponent(tempUser.email)}&profile_completed=true`
-          );
-        }, 2000);
-        return;
       }
 
-      // Si l'utilisateur courant est un patient, valider et sauver dans la table patients
-      if (getPrimaryRole() === "patient") {
-        // Construire le payload à partir de l'état `patient` ou `profileData`
+      const primaryRole = getPrimaryRole();
+
+      // Patient flow: validate and create/update patient record
+      if (primaryRole === "patient") {
         const payload = {
-          firstName: patient?.firstName ?? profileData.firstName,
-          lastName: patient?.lastName ?? profileData.lastName,
-          dateOfBirth:
-            patient?.dateOfBirth ?? patient?.dateOfBirth ?? undefined,
-          gender: patient?.gender ?? undefined,
-          phone: patient?.phone ?? profileData.phone,
+          userId: userId || "",
+          firstName: (
+            (patient?.firstName ?? profileData.firstName) ||
+            ""
+          ).trim(),
+          lastName: ((patient?.lastName ?? profileData.lastName) || "").trim(),
+          dateOfBirth: patient?.dateOfBirth ?? "",
+          gender: patient?.gender ?? "",
+          phone: ((patient?.phone ?? profileData.phone) || "").trim(),
           address: {
             street: patient?.address?.street ?? profileData.address ?? "",
             city: patient?.address?.city ?? "",
@@ -407,7 +380,6 @@ export default function Profile() {
           consent: patient?.consent ?? undefined,
         };
 
-        // Valider avec Zod
         const parsed = patientSchema.safeParse(payload);
         if (!parsed.success) {
           const issues = parsed.error.flatten();
@@ -420,16 +392,11 @@ export default function Profile() {
         }
 
         try {
-          // Si on a déjà un patient existant, PATCH par id
           if (patient && (patient._id || patient.id)) {
             const id = patient._id || patient.id;
             await apiClient.patch(`/patients/${id}`, parsed.data);
           } else {
-            // Créer un nouveau patient lié à l'utilisateur
-            await apiClient.post(`/patients`, {
-              user: currentUser.id,
-              ...parsed.data,
-            });
+            await apiClient.post(`/patients`, parsed.data);
           }
 
           setSuccess(
@@ -440,23 +407,70 @@ export default function Profile() {
           setTimeout(() => navigate("/dashboard?from=profile"), 1200);
           return;
         } catch (pe: any) {
-          // fallback: essayer upsert via user id si endpoints différents
+          const status = pe?.response?.status;
+          if (status === 403) {
+            setError(
+              "Vous n'avez pas la permission de créer un profil patient. Contactez l'administrateur."
+            );
+            setIsLoading(false);
+            return;
+          }
+
+          // fallback: try to find existing and patch, or try other upserts
           try {
-            await apiClient.patch(`/patients/user/${currentUser.id}`, payload);
+            const listRes = await apiClient.get(`/patients`, {
+              params: { user: payload.userId },
+            });
+            const list = listRes.data?.data ?? listRes.data;
+            if (Array.isArray(list) && list.length > 0) {
+              const existing = list[0];
+              const id = existing._id || existing.id;
+              if (id) {
+                await apiClient.patch(`/patients/${id}`, parsed.data);
+              } else {
+                await apiClient.patch(
+                  `/patients/user/${payload.userId}`,
+                  parsed.data
+                );
+              }
+            } else {
+              try {
+                await apiClient.put(`/patients/${payload.userId}`, parsed.data);
+              } catch (putErr: any) {
+                await apiClient.patch(
+                  `/patients/user/${payload.userId}`,
+                  parsed.data
+                );
+              }
+            }
+
             setSuccess(
-              "✅ Profil patient enregistré (via user upsert) ! Redirection..."
+              "✅ Profil patient enregistré (via fallback) ! Redirection..."
             );
             localStorage.removeItem("cf_registration_data");
             setTimeout(() => navigate("/dashboard?from=profile"), 1200);
             return;
-          } catch (pe2: any) {
-            console.error("Erreur sauvegarde patient:", pe2);
-            throw pe2;
+          } catch (fallbackErr: any) {
+            console.error("Erreur création/upsert patient:", fallbackErr);
+            // Save locally for retry
+            try {
+              const key = `cf_pending_patient_${payload.userId}`;
+              localStorage.setItem(key, JSON.stringify(parsed.data));
+              setPendingSaveKey(key);
+              setError(
+                "Impossible de sauvegarder côté serveur. Données sauvegardées localement."
+              );
+              setIsLoading(false);
+              return;
+            } catch (storeErr) {
+              console.error("Erreur sauvegarde locale:", storeErr);
+              throw fallbackErr;
+            }
           }
         }
       }
 
-      // Utiliser apiClient avec fallback si endpoint /users/:id n'existe pas
+      // non-patient: update user
       try {
         await apiClient.patch(`/users/${currentUser.id}`, {
           name: profileData.name,
@@ -468,7 +482,6 @@ export default function Profile() {
         });
       } catch (e: any) {
         if (e?.response?.status === 404) {
-          // essayer endpoint alternatif
           try {
             await apiClient.patch(`/users/profile`, {
               name: profileData.name,
@@ -496,17 +509,10 @@ export default function Profile() {
 
       setSuccess("Profil mis à jour avec succès !");
       setIsEditing(false);
-
-      // Si c'est un nouvel utilisateur (welcome=true), rediriger vers dashboard
       if (isWelcome) {
-        setTimeout(() => {
-          navigate("/dashboard?from=profile");
-        }, 1500);
+        setTimeout(() => navigate("/dashboard?from=profile"), 1500);
       } else {
-        // Sinon, juste recharger les données
-        setTimeout(() => {
-          window.location.reload();
-        }, 1500);
+        setTimeout(() => window.location.reload(), 1500);
       }
     } catch (err: any) {
       setError(err.message || "Erreur lors de la mise à jour");
@@ -627,6 +633,31 @@ export default function Profile() {
               {success && (
                 <div className="mb-6 p-4 bg-green-50 border border-green-200 rounded-lg">
                   <p className="text-green-800 text-sm">{success}</p>
+                </div>
+              )}
+
+              {/* Retry saved payload if present */}
+              {pendingSaveKey && (
+                <div className="mb-4 flex gap-3">
+                  <button
+                    onClick={retryPendingSave}
+                    disabled={isRetrying}
+                    className="bg-yellow-500 text-white px-4 py-2 rounded hover:bg-yellow-600 transition-colors"
+                  >
+                    {isRetrying ? "Réessai..." : "Réessayer l'envoi"}
+                  </button>
+                  <button
+                    onClick={() => {
+                      try {
+                        localStorage.removeItem(pendingSaveKey);
+                      } catch {}
+                      setPendingSaveKey(null);
+                      setError("");
+                    }}
+                    className="bg-gray-100 text-slate-700 px-4 py-2 rounded hover:bg-gray-200 transition-colors"
+                  >
+                    Supprimer la sauvegarde locale
+                  </button>
                 </div>
               )}
 
