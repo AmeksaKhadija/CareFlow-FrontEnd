@@ -45,36 +45,17 @@ export default function UsersPage() {
     setLoading(true);
     setError("");
     try {
-      console.log("🔄 [Users] Attempting to load users...");
-      console.log("🔄 [Users] API Base URL:", "http://localhost:8000/api");
-
       const data = await userService.getUsers();
-
-      console.log("📦 [Users] Raw response data:", data);
-      console.log("📦 [Users] Data type:", typeof data);
-      console.log("📦 [Users] Is array?", Array.isArray(data));
-
       // normalize: backend may return array or { data: [...] } or { users: [...] }
       const list = Array.isArray(data)
         ? data
         : (data?.users ?? data?.data ?? []);
-
-      console.log("✅ [Users] Normalized user list:", list);
-      console.log("✅ [Users] User count:", list ? list.length : 0);
-
       setUsers(list || []);
     } catch (e: any) {
-      console.error("❌ [Users] Error loading users:", e);
-      console.error("❌ [Users] Error status:", e?.response?.status);
-      console.error("❌ [Users] Error data:", e?.response?.data);
-      console.error("❌ [Users] Error message:", e?.message);
-
       const errorMessage =
         e?.response?.data?.message ||
         e?.message ||
         "Erreur lors du chargement des utilisateurs";
-
-      console.error("❌ [Users] Final error message:", errorMessage);
       setError(errorMessage);
     } finally {
       setLoading(false);
@@ -192,17 +173,8 @@ export default function UsersPage() {
   // Only admin or secretary can manage users
   const role = user.role || "";
   const roleLower = (role || "").toString().toLowerCase();
-
-  // Debug logs pour diagnostiquer le problème d'accès
-  console.log("🔍 DEBUG - User object:", user);
-  console.log("🔍 DEBUG - User role:", role);
-  console.log("🔍 DEBUG - Role lower:", roleLower);
-  console.log("🔍 DEBUG - Is admin?", roleLower === "admin");
-  console.log("🔍 DEBUG - AllowedForCreate?", allowedForCreate(roleLower));
-
   // Temporairement, permettons l'accès à tous les utilisateurs connectés pour debug
   const hasAccess = roleLower === "admin" || allowedForCreate(roleLower);
-  console.log("🔍 DEBUG - Has access?", hasAccess);
 
   // TEMPORAIRE : Permettre l'accès à tous pour tester
   if (false && !hasAccess) {
